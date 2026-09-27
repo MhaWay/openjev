@@ -25,6 +25,7 @@ RUN uv pip install --python /opt/venv/bin/python --no-cache .
 COPY docker/entrypoint.sh /usr/local/bin/openjev-entrypoint
 
 ENV OPENJEV_BACKEND=clm OPENJEV_UPSTREAM_MODEL=qwen3-8b OPENJEV_HOST=0.0.0.0 OPENJEV_PORT=8080
+ENV VLLM_USE_DEEP_GEMM=0
 EXPOSE 8080
 HEALTHCHECK --interval=15s --timeout=3s --start-period=600s \
     CMD curl -sf http://127.0.0.1:8080/health || exit 1
