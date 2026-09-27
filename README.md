@@ -79,7 +79,8 @@ Question types:
 
 - **`noul`** (yes/no): takes optional `criteria: {true, false}`. Returns `{noul: P(yes)}`.
 - **`choice`**: takes `criteria: {name: description}`. Returns `{choice, probabilities, confidence}`.
-- **`score`**: takes `criteria: [level0, level1, …]` (2–10 levels). Returns `{score: Σ i·pᵢ, legend, probabilities, confidence}`.
+- **`score`**: takes `criteria: [level0, level1, …]` (1–10 levels; a single level is answered
+  directly, as for a choice with one option). Returns `{score: Σ i·pᵢ, legend, probabilities, confidence}`.
 
 `confidence` is `1 − H(p)/ln K`: 1 when the model is certain, 0 when the distribution is
 uniform. `usage.input_tokens` counts prompt tokens, image tokens included.
