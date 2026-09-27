@@ -251,6 +251,11 @@ def test_request_body_is_capped(tok):
     with TestClient(create_app(Settings(max_body_bytes=512), tokenizer=tok)) as c:
         r = c.post("/v1/systemone", json=EXAMPLE)  # the quickstart body is over 512 bytes
         assert r.status_code == 413 and "512" in r.json()["detail"]["message"]
+        assert r.headers["x-request-id"].startswith("req_")
+        # a body sent without a Content-Length is counted as it arrives
+        r = c.post("/v1/systemone", content=iter([_json.dumps(EXAMPLE).encode()]),
+                   headers={"content-type": "application/json"})
+        assert r.status_code == 413 and "content-length" not in r.request.headers
         small = {"state": "x", "model": "jev-latest", "questions": {"a": {"type": "noul"}}}
         assert c.post("/v1/systemone", json=small).status_code == 503
         assert c.get("/v1/models").status_code == 200
@@ -438,7 +443,7 @@ def test_chat_max_tokens_must_be_an_integer(tok):
 
     c = chat_client(tok, handler)
     msg = {"model": "diffusiongemma-26b", "messages": [{"role": "user", "content": "hi"}]}
-    for bad in ("abc", True, 3.9):
+    for bad in ("abc", True, 3.9, 0, -5):
         r = c.post("/v1/chat/completions", json=dict(msg, max_tokens=bad))
         assert r.status_code == 400 and "max_tokens" in r.json()["error"]["message"], (bad, r.text)
     r = c.post("/v1/chat/completions", json=dict(msg, max_completion_tokens="50"))

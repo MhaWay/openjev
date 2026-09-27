@@ -216,21 +216,11 @@ def create_app(settings=None, tokenizer=None):
         rid = "req_" + secrets.token_hex(16)
         request.state.request_id = rid
         if request.url.path.startswith("/v1/"):
-            denied = check_auth(settings, request)
+            denied = check_auth(settings, request) or await read_capped_body(settings, request)
             if denied is not None:
                 denied.headers["x-typesafe-request-id"] = rid
                 denied.headers["x-request-id"] = rid
                 return denied
-            if request.method == "POST":
-                # Neither uvicorn nor FastAPI bounds a body. Read it here, past auth
-                # so an anonymous giant is refused before it costs any memory.
-                body = bytearray()
-                async for chunk in request.stream():
-                    body.extend(chunk)
-                    if len(body) > settings.max_body_bytes:
-                        return error(413, "api_usage_error",
-                                     f"request body is larger than {settings.max_body_bytes} bytes")
-                request._body = bytes(body)
         spent = [0]
         model_ns.set(spent)
         started = time.perf_counter_ns()
@@ -309,6 +299,28 @@ async def forward(request, url):
             spent[0] += time.perf_counter_ns() - started
     keep = {h: r.headers[h] for h in ("content-type", "retry-after") if h in r.headers}
     return Response(r.content, status_code=r.status_code, headers=keep)
+
+
+async def read_capped_body(settings, request):
+    """Read a POST body up to OPENJEV_MAX_BODY_BYTES, or the 413 past it. Neither
+    uvicorn nor FastAPI bounds a body; this runs past auth, so an anonymous giant
+    is refused before it costs any memory."""
+    if request.method != "POST":
+        return None
+    too_big = error(413, "api_usage_error", f"request body is larger than {settings.max_body_bytes} bytes")
+    try:
+        if int(request.headers.get("content-length", "0")) > settings.max_body_bytes:
+            return too_big  # declared too big: refused without reading a byte
+    except ValueError:
+        pass
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > settings.max_body_bytes:
+            return too_big
+    # Starlette replays a middleware-read _body to the route (1.6: _CachedRequest)
+    request._body = bytes(body)
+    return None
 
 
 def check_auth(settings, request):

@@ -54,16 +54,16 @@ class Generator:
     def normalize(self, body):
         """The vLLM request for an OpenAI-style one, and whether the caller
         asked for JSON. Raises ValueError (a 400) for a max_tokens that is not
-        an integer: int() used to crash the route on a string, and silently
-        turned True into 1 and 3.9 into 3."""
+        a positive integer, as OpenAI does: int() used to crash the route on a
+        string, and silently turned True into 1, 3.9 into 3 and 0 into 1024."""
         out = {k: v for k, v in body.items() if k in PASSTHROUGH}
         out["model"] = self.s.upstream_model
         max_tokens = out.get("max_tokens", body.get("max_completion_tokens"))
         if max_tokens is None:
             max_tokens = DEFAULT_MAX_TOKENS
-        if not isinstance(max_tokens, int) or isinstance(max_tokens, bool):
-            raise ValueError(f"max_tokens must be an integer, got {max_tokens!r}")
-        out["max_tokens"] = max(1, min(max_tokens, self.s.gen_max_tokens))
+        if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens < 1:
+            raise ValueError(f"max_tokens must be a positive integer, got {max_tokens!r}")
+        out["max_tokens"] = min(max_tokens, self.s.gen_max_tokens)
         out["chat_template_kwargs"] = {"enable_thinking": False, **(out.get("chat_template_kwargs") or {})}
         if out.get("stream"):
             out["stream_options"] = {**(out.get("stream_options") or {}), "include_usage": True}
