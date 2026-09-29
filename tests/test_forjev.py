@@ -66,6 +66,20 @@ def test_native_api_typed_answers_and_optional_images(upstream, images):
         assert b["messages"][1]["content"][0]["type"] == ("image_url" if images else "text")
 
 
+def test_typesafe_sdk_default_model_uses_forjev(upstream):
+    from typesafe_sdk import TypeSafeClient
+
+    with TestClient(create_app(settings())) as client:
+        sdk = TypeSafeClient(api_key="unused", base_url="http://testserver", http_client=client)
+        result = sdk.system_one("A zombie is approaching.", {
+            "move": {"type": "choice", "instructions": "Choose a safe action.",
+                     "criteria": {"stay": "Remain in place", "flee": "Move away"}},
+        })
+        assert result.choices["move"].choice == "flee"
+        assert result.choices["move"].probabilities["flee"] > 0.9
+    assert any(req.url.path == "/v1/chat/completions" for req, _ in upstream)
+
+
 @pytest.mark.parametrize("field,value", [("think", 1), ("sequential", True), ("steps", 2), ("samples", 2)])
 def test_unsupported_options_rejected_before_inference(upstream, field, value):
     with TestClient(create_app(settings())) as client:
