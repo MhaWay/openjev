@@ -84,10 +84,10 @@ Provider/API references, checked 2026-09-29:
 
 ## Install and serve on DGX Spark
 
-Use the `feature/forjev` branch of this OpenJEV fork in its own directory:
+Clone this OpenJEV fork in its own directory:
 
 ```bash
-git clone --branch feature/forjev https://github.com/MhaWay/openjev.git ~/openjev-forjev
+git clone https://github.com/MhaWay/openjev.git ~/openjev-forjev
 ```
 
 Python 3.12 on Linux is the tested installer target; `python3-venv` must exist.
@@ -225,6 +225,12 @@ build supports this route for small candidate sets; verify this new integration
 live before treating it as production-ready. Do not upgrade a working image
 merely to install this adapter.
 
+The pinned vLLM build has occasionally returned an HTTP 500 while assembling
+one-token chat logprobs (`_create_chat_logprobs`: `list index out of range`).
+ForJev retries that specific response at most twice, with short delays. Other
+errors still propagate. This mitigates an intermittent serving failure; it
+does not fix its root cause in vLLM or prove that all future requests succeed.
+
 Inspect the actual IDs and test all configured candidates:
 
 ```bash
@@ -298,16 +304,50 @@ Current target: Qwen3.8-Flash-Next served by the existing pinned Eugr b12x
 stack. Future Qwen4 compatibility is a goal, not an already tested guarantee;
 the HTTP contract, template, labels and quality must be checked with each model.
 
-Offline tests cover the native OpenJEV API, state/image handling, typed
-answers, complete candidate probabilities, labels beyond 52, unsupported
-options, chat streaming/auth, and adapter start/stop against a fake upstream.
+Offline tests cover the native OpenJEV API, TypeSafe SDK default-model calls,
+state/image handling, typed answers, complete candidate probabilities, labels
+beyond 52, the narrow HTTP 500 retry, unsupported options, chat streaming/auth,
+and adapter start/stop against a fake upstream.
 They do not establish accuracy, calibration, latency, 255-choice availability
 or compatibility with a real future model.
 
 ```bash
-.venv-forjev/bin/python -m pip install pytest
+.venv-forjev/bin/python -m pip install pytest 'typesafe-sdk>=0.7'
 .venv-forjev/bin/python -m pytest -q tests/test_forjev.py tests/test_forjev_service.py
 ```
+
+### Public JevBench run
+
+On 2026-09-29, one DGX Spark running the pinned Eugr b12x Qwen3.8-Flash-Next
+INT4 setup answered all **231 public JevBench tasks** through ForJev's
+`/v1/systemone` route: **202/231 correct (87.45%)**, 231/231 valid answers,
+0 failed requests, top-label ECE 0.0388 and Brier mean 0.1728. Local
+end-to-end latency was p50 0.215 s and p95 1.312 s, with the normal Qwen
+harness also active. This run saw no upstream 500s, so the retry was not used.
+The dataset hash recorded by JevBench was
+`dc3995d8ae1e2fc8e81ce38431add509eb8bb39b85aadfd0c7c32079382dde51`.
+The JevBench checkout was `bb05a335bc809e61b20c0f745d25499a82b326fc`.
+
+To reproduce against an already running ForJev server, clone JevBench and run
+its `typesafe` adapter with the three public datasets and a fresh results
+directory. The endpoint below is loopback on the same host as ForJev:
+
+```bash
+git clone https://github.com/fstandhartinger/jevbench.git ~/jevbench
+cd ~/jevbench
+RUN_DIR="$HOME/forjev-bench-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$RUN_DIR"
+python3 -m jevbench.cli run --tasks datasets/public/easy.jsonl,datasets/public/original.jsonl,datasets/public/hard.jsonl --adapter typesafe --endpoint http://127.0.0.1:8001 --model forjev-qwen-next --key-env '' --cost-basis self_hosted_no_provider_tariff --reserve-usd 0 --results "$RUN_DIR/results.jsonl" --raw-dir "$RUN_DIR/raw" --ledger "$RUN_DIR/ledger.jsonl" --manifest "$RUN_DIR/manifest.json"
+python3 -m jevbench.cli summarize --tasks datasets/public/easy.jsonl,datasets/public/original.jsonl,datasets/public/hard.jsonl --results "$RUN_DIR/results.jsonl" --public-export "$RUN_DIR/summary.json"
+```
+
+This is the **public subset**, not a full official JevBench score. No
+self-hosted compute cost was measured. Model size, deployment, input ordering
+and network conditions differ across published systems; small differences in
+correct counts or latency should not be described as proven superiority.
+The [JevBench harness](https://github.com/fstandhartinger/jevbench) and an
+[independent public-subset comparison](https://github.com/Zefan-Cai/Open-Jev/blob/main/docs/jevbench-public.md)
+give the dataset and comparison context. The raw run artifacts are currently
+stored on the Spark at `~/forjev-bench-20260929-153053/`.
 
 Credits and licensing: OpenJEV by razorback16 and contributors, Apache-2.0;
 ForJev integration uses the same repository license. Existing model licenses
