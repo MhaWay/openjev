@@ -103,6 +103,46 @@ def test_missing_candidates_fail_closed():
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("statuses,path,message,expected_calls", [
+    ([500, 500, 200], "/v1/chat/completions", "list index out of range", 3),
+    ([500, 500, 500], "/v1/chat/completions", "list index out of range", 3),
+    ([500, 200], "/tokenize", "list index out of range", 1),
+    ([500, 200], "/v1/chat/completions", "other failure", 1),
+    ([503, 200], "/v1/chat/completions", "unavailable", 1),
+    ([400, 200], "/v1/chat/completions", "invalid request", 1),
+])
+def test_only_known_chat_logprob_failure_is_retried(monkeypatch, statuses, path, message, expected_calls):
+    calls = []
+    original = httpx.AsyncClient
+    def respond(request):
+        calls.append(json.loads(request.content))
+        status = statuses[len(calls) - 1]
+        if status == 500:
+            return httpx.Response(500, json={"error": {"message": message}})
+        if status == 400:
+            return httpx.Response(400, json={"error": {"message": "invalid request"}})
+        return httpx.Response(status, json={"ok": True})
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original(
+        **{**kw, "transport": httpx.MockTransport(respond)}))
+
+    async def run():
+        engine = ForJevEngine(settings())
+        try:
+            if statuses[-1] == 200 and expected_calls == len(statuses):
+                assert await engine._post(path, {"max_tokens": 1}) == {"ok": True}
+            elif statuses[0] == 400:
+                with pytest.raises(Upstream, match="invalid request"):
+                    await engine._post(path, {"max_tokens": 1})
+            else:
+                with pytest.raises(httpx.HTTPStatusError):
+                    await engine._post(path, {"max_tokens": 1})
+        finally:
+            await engine.close()
+    asyncio.run(run())
+    assert len(calls) == expected_calls
+    assert all(body == calls[0] for body in calls)
+
+
 def test_chat_proxy_stream_tools_and_separate_credentials(upstream):
     with TestClient(create_app(settings(api_key="frontend", forjev_upstream_api_key="upstream"))) as client:
         assert client.post("/v1/chat/completions", json={}).status_code == 403
