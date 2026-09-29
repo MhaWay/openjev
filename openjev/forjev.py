@@ -41,15 +41,28 @@ class ForJevEngine(EncoderEngine):
         await self.client.aclose()
 
     async def _post(self, path, body):
-        r = await self.client.post(path, json=body)
-        if 400 <= r.status_code < 500:
-            try:
-                message = r.json().get("error", {}).get("message") or r.text
-            except ValueError:
-                message = r.text
-            raise Upstream(str(message)[:500])
-        r.raise_for_status()
-        return r.json()
+        # The pinned vLLM build can intermittently return a 500 while building
+        # chat logprobs for a one-token response. Retry only that known failure;
+        # tokenize, client errors, and other server errors retain their usual
+        # behavior. Each retry is a new read-only inference request.
+        for attempt in range(3):
+            r = await self.client.post(path, json=body)
+            if 400 <= r.status_code < 500:
+                try:
+                    message = r.json().get("error", {}).get("message") or r.text
+                except ValueError:
+                    message = r.text
+                raise Upstream(str(message)[:500])
+            if path == "/v1/chat/completions" and r.status_code == 500 and attempt < 2:
+                try:
+                    message = r.json().get("error", {}).get("message")
+                except (ValueError, AttributeError):
+                    message = None
+                if message == "list index out of range":
+                    await asyncio.sleep((0.05, 0.15)[attempt])
+                    continue
+            r.raise_for_status()
+            return r.json()
 
     async def _ids(self, count):
         # Discover unique, single-token labels in the *served* tokenizer.
