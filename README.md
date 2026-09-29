@@ -1,4 +1,4 @@
-> **ForJev branch:** use an existing Qwen/vLLM endpoint without loading another model.
+> **ForJev backend:** use an existing Qwen/vLLM endpoint without loading another model.
 > See [ForJev setup, API requirements and examples](README-ForJev.md).
 > Default deployment: OpenJEV/ForJev on `:8001`, existing Qwen on `:8000`.
 > Run `bash setup-forjev.sh` then `bash restart-forjev.sh start`.
