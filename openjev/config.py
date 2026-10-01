@@ -55,6 +55,17 @@ class Settings:
     jevk5_workers: int = field(default_factory=lambda: int(_env("OPENJEV_JEVK5_WORKERS", "32")))
     forjev_max_choices: int = field(default_factory=lambda: int(_env("FORJEV_MAX_CHOICES", "20")))
     forjev_upstream_api_key: str = field(default_factory=lambda: _env("FORJEV_UPSTREAM_API_KEY", ""))
+    # vLLM intermittently answers 500 under load (and rejects some logprob/sampling
+    # params while speculative decoding is active). Decisions are read-only and
+    # idempotent, so transient upstream failures are retried with backoff instead of
+    # failing a live decision or the startup capability probe.
+    forjev_retries: int = field(default_factory=lambda: int(_env("FORJEV_RETRIES", "4")))
+    forjev_retry_backoff_ms: int = field(default_factory=lambda: int(_env("FORJEV_RETRY_BACKOFF_MS", "250")))
+    forjev_retry_factor: float = field(default_factory=lambda: float(_env("FORJEV_RETRY_FACTOR", "2.0")))
+    forjev_retry_max_ms: int = field(default_factory=lambda: int(_env("FORJEV_RETRY_MAX_MS", "2000")))
+    forjev_retry_jitter: bool = field(default_factory=lambda: _env("FORJEV_RETRY_JITTER", "1") == "1")
+    forjev_upstream_cooldown_ms: int = field(default_factory=lambda: int(_env("FORJEV_UPSTREAM_COOLDOWN_MS", "1500")))
+    forjev_upstream_cooldown_failures: int = field(default_factory=lambda: int(_env("FORJEV_UPSTREAM_COOLDOWN_FAILURES", "3")))
     warmup: bool = field(default_factory=lambda: _env("OPENJEV_WARMUP", "1") != "0")
     # Other System One models served by other OpenJev containers: "name=url,name=url".
     # A request for one of them is passed through unchanged, so one origin serves all.
