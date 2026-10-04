@@ -89,21 +89,7 @@ class ForJevEngine(EncoderEngine):
     async def _question(self, state_text, q, images):
         pairs = await self._ids(len(q["choices"]))
         ids = [tid for _, tid in pairs]
-        options = "\n".join(
-            f"{label}. {name}: {description}" if description else f"{label}. {name}"
-            for (label, _), (name, description) in zip(pairs, q["choices"])
-        )
-        prompt = (f"Current state: {state_text}\nQuestion: {q['instructions']}\n"
-                  f"Options:\n{options}\nAnswer with one label only:")
-        content = list(images or []) + [{"type": "text", "text": prompt}]
-        request = {
-            "model": self.s.upstream_model,
-            "messages": [
-                {"role": "system", "content": "Select exactly one listed answer from the current state and image, if present."},
-                {"role": "user", "content": content},
-            ],
-            "chat_template_kwargs": {"enable_thinking": False},
-        }
+        request = self.question_request(state_text, q, images, pairs)
         if self.s.forjev_scoring != "chat_logprobs":
             async with self.slots:
                 d = await self._post("/v1/decision_scores", {
@@ -134,6 +120,24 @@ class ForJevEngine(EncoderEngine):
             return normalize(values), d["usage"]["prompt_tokens"]
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise Upstream("Qwen returned incomplete candidate logprobs") from exc
+
+    def question_request(self, state_text, q, images, pairs):
+        """One prompt builder for inference and controlled scoring diagnostics."""
+        options = "\n".join(
+            f"{label}. {name}: {description}" if description else f"{label}. {name}"
+            for (label, _), (name, description) in zip(pairs, q["choices"])
+        )
+        prompt = (f"Current state: {state_text}\nQuestion: {q['instructions']}\n"
+                  f"Options:\n{options}\nAnswer with one label only:")
+        content = list(images or []) + [{"type": "text", "text": prompt}]
+        return {
+            "model": self.s.upstream_model,
+            "messages": [
+                {"role": "system", "content": "Select exactly one listed answer from the current state and image, if present."},
+                {"role": "user", "content": content},
+            ],
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
 
     async def decide(self, questions, state, seed, images=None, options=None):
         opts = options or {}

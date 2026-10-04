@@ -212,6 +212,30 @@ To roll back, launch with `B12X_IMAGE=vllm-node-b12x` (or your original pinned
 image), using the same serving configuration. Both launches recreate the
 container and reload the resident model; neither downloads another checkpoint.
 
+## Diagnose probability differences under concurrency
+
+`python -m openjev.forjev_parity` replays selected questions from a saved
+WorkflowEvals `results.json` using the same prompt builder as ForJev. It sends
+the same messages, template options and candidates directly to the numeric
+route, comparing serial and concurrent native requests, then serial and
+concurrent engine-logprob requests. It bypasses the adapter's inflight limit
+and SDK retries; no serving changes or restart are required. Run without other
+model traffic. The default is two repeats, concurrency two and a 30-second
+per-request timeout. A failed phase stops the diagnostic and saves its errors.
+
+The JSON report includes prompt hashes, candidate IDs, raw scores, probabilities,
+execution metadata and timings, but no state, prompt or credentials. It checks
+matching prompts/candidates before comparing distributions. This does not reset
+the prefix cache, establish a cold-cache baseline or guarantee identical GPU
+arithmetic across batch shapes. The engine bridge is a comparison path, not an
+independent correctness oracle; failures from its logprob collector are recorded.
+
+Example (replace the result path with your saved run):
+
+```bash
+cd ~/openjev-forjev && set -a && source .forjev.env && set +a && .venv-forjev/bin/python -m openjev.forjev_parity --results ~/workflowevals-forjev/runs/invoice_processing/forjev-native-inflight1-20261004-185719/results.json --output .forjev-run/parity.json
+```
+
 ## Runtime integration
 
 Install this package inside the existing vLLM runtime and call
