@@ -143,8 +143,16 @@ Restarting vLLM activates them and reloads the same model weights, interrupting
 current inference. Schedule that interruption between agent runs:
 
 ```bash
-docker exec qwen38-flash python3 -m openjev.b12x_patch --apply && docker restart qwen38-flash
+docker exec qwen38-flash python3 -m openjev.b12x_patch --apply
 ```
+
+Then restart the **vLLM process using its actual process manager**. A Docker
+restart is sufficient only when the container entrypoint starts vLLM again.
+Eugr's B12X launcher uses `Action: exec`: restarting the container does not
+repeat that launch command. The reference Qwen `serve.sh` also removes the
+old container before launching a new one, losing any installation made with
+`docker exec`. For that launcher, use the persistent image deployment below
+instead of installing in the running container and calling `docker restart`.
 
 After vLLM is healthy, install the matching ForJev source revision in the host
 adapter environment with `bash setup-forjev.sh`. This is a separate adapter
@@ -160,17 +168,49 @@ The shell override applies only to the probe. After live acceptance, set
 default legacy mode until then. Native mode fails rather than silently reverting
 to generation if its provider is unsupported or malformed.
 
-Rollback is also a single line (it interrupts Qwen):
+For an installation retained in the same container, restore the original files:
 
 ```bash
-docker exec qwen38-flash python3 -m openjev.b12x_patch --revert && docker restart qwen38-flash
+docker exec qwen38-flash python3 -m openjev.b12x_patch --revert
 ```
 
-Container recreation loses these installed changes. For a durable deployment,
-build a derivative of the exact pinned B12X image, copy this package into it,
-install with `--no-deps`, and run `python -m openjev.b12x_patch --apply` during
-the image build. Preserve the original entrypoint and serving configuration.
-The source fingerprint check also applies to that build.
+Restart vLLM through its process manager afterward. For a derived image,
+rollback instead means launching the original image as described below.
+
+### Persistent deployment with the Eugr/Qwen launcher
+
+`deploy/B12X.Dockerfile` installs the package and applies the checked patch in
+a derivative of the existing B12X image. It preserves the base image's startup
+configuration. It copies no weights and resolves no Python dependencies. Build
+from a committed source archive, keeping local environment files out of the
+Docker context. Replace the base image with the exact pinned image you use:
+
+```bash
+cd ~/openjev-forjev && git fetch origin feature/forjev-direct-scores && FORJEV_BUILD_DIR=$(mktemp -d /tmp/forjev-image.XXXXXX) && git archive origin/feature/forjev-direct-scores | tar -x -C "$FORJEV_BUILD_DIR" && docker build --network=none --build-arg B12X_BASE_IMAGE=vllm-node-b12x -f "$FORJEV_BUILD_DIR/deploy/B12X.Dockerfile" -t vllm-node-b12x-forjev "$FORJEV_BUILD_DIR"
+```
+
+Build completion verifies the five source fingerprints; it is not GPU runtime
+acceptance. A missing build dependency or changed source aborts the build rather
+than downloading dependencies or accepting an unverified runtime. The original
+image and running server are unaffected by this build.
+
+The reference Qwen launcher accepts `B12X_IMAGE` through `config.env` and
+passes it to Eugr's launcher. During a scheduled interruption, launch with:
+
+```bash
+cd ~/Qwen3.8-Flash-Next-Int4-FAST && B12X_IMAGE=vllm-node-b12x-forjev ./serve.sh
+```
+
+Retain your existing environment overrides and foreground/background choice.
+Set `B12X_IMAGE` in your persistent launcher configuration for subsequent runs;
+the command above overrides it for that invocation only. Qwen's existing mods
+still run before vLLM starts. Confirm `/v1/decision_scores` is registered, then
+run the native capability probe and live acceptance checks. This image/launcher
+path still needs testing on the actual Spark.
+
+To roll back, launch with `B12X_IMAGE=vllm-node-b12x` (or your original pinned
+image), using the same serving configuration. Both launches recreate the
+container and reload the resident model; neither downloads another checkpoint.
 
 ## Runtime integration
 
