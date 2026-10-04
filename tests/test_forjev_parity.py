@@ -18,8 +18,9 @@ def test_comparisons_reject_different_prompts_and_candidates():
             comparisons([row, {**row, **changed}])
 
 
+@pytest.mark.parametrize("skip_cache", [False, True])
 @pytest.mark.parametrize("fail", [False, True])
-def test_replay_identical_prompts_provider_selection_and_no_retry(tmp_path, monkeypatch, fail):
+def test_replay_identical_prompts_provider_selection_and_no_retry(tmp_path, monkeypatch, fail, skip_cache):
     path = tmp_path / "results.json"
     path.write_text(json.dumps({"runs": [{"cases": [{"calls": [{
         "state": {"invoice": "fixed state"},
@@ -43,10 +44,11 @@ def test_replay_identical_prompts_provider_selection_and_no_retry(tmp_path, monk
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original(
         **{**kwargs, "transport": httpx.MockTransport(respond)}))
     args = argparse.Namespace(results=str(path), questions="one,two", timeout=3,
-                              repeats=2, parallel=2)
+                              repeats=2, parallel=2, skip_prefix_cache=skip_cache)
     result = asyncio.run(replay(args))
     assert result["stopped_on_error"] == fail
     assert len(bodies) == (2 if fail else 16)
+    assert all(b.get("skip_reading_prefix_cache", False) == skip_cache for b in bodies)
     assert all(b["messages"] == bodies[0]["messages"] for b in bodies)
     assert all(b["candidate_token_ids"] == bodies[0]["candidate_token_ids"] for b in bodies)
     if not fail:

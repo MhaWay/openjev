@@ -77,6 +77,23 @@ def test_duplicate_route_installation_is_rejected():
         install_routes(make_app())
 
 
+@pytest.mark.parametrize("native", [False, True])
+def test_cache_bypass_reaches_selected_provider(native):
+    async def render(*args):
+        return {"prompt_token_ids": [1]}
+    async def provider(chat, prompt, ids, **kwargs):
+        assert kwargs["skip_reading_prefix_cache"] is True
+        return score_response(ids, [-2., -1.], 1,
+                              score_type="raw_logits" if native else "raw_logprobs",
+                              execution="prefill_logits" if native else "engine_logprobs")
+    with TestClient(make_app(render=render, score=provider, prefill_score=provider)) as client:
+        response = client.post("/v1/decision_scores", json=body(
+            require_prefill=native, skip_reading_prefix_cache=True))
+        assert response.status_code == 200, response.text
+        assert client.post("/v1/decision_scores", json=body(
+            skip_reading_prefix_cache="true")).status_code == 422
+
+
 def test_bridge_requests_remain_bridge_when_native_provider_is_installed():
     async def render(*args):
         return {"prompt_token_ids": [1]}

@@ -75,8 +75,10 @@ async def replay(args):
                 started = time.perf_counter()
                 try:
                     # Direct post: intentionally bypass the adapter/SDK retry logic.
+                    cache_options = ({"skip_reading_prefix_cache": True}
+                                     if getattr(args, "skip_prefix_cache", False) else {})
                     response = await engine.client.post("/v1/decision_scores",
-                                                        json={**body, "require_prefill": native})
+                                                        json={**body, "require_prefill": native, **cache_options})
                     response.raise_for_status()
                     data = response.json()
                     probs, tokens = parse_response(data, row["token_ids"], require_prefill=native)
@@ -91,7 +93,9 @@ async def replay(args):
                 row["seconds"] = time.perf_counter() - started
             return row
 
-        phases = [(native, repeat, width) for native in (True, False)
+        # Reference first: native requests in this run cannot affect its cache.
+        providers = {"both": (False, True), "engine": (False,), "native": (True,)}
+        phases = [(native, repeat, width) for native in providers[getattr(args, "providers", "both")]
                   for repeat in range(args.repeats) for width in (1, args.parallel)]
         for native, repeat, width in phases:
             phase = f"{'native' if native else 'engine'}-c{width}-r{repeat+1}"
@@ -103,9 +107,11 @@ async def replay(args):
                               "errors": [r["error"] for r in rows if not r["ok"]]}), flush=True)
             if any(not r["ok"] for r in rows):
                 # Finish the failed phase, then stop instead of accumulating long timeouts.
-                return {"records": records, "comparisons": comparisons(records),
-                            "stopped_on_error": True}
-        return {"records": records, "comparisons": comparisons(records), "stopped_on_error": False}
+                return {"skip_reading_prefix_cache": getattr(args, "skip_prefix_cache", False),
+                        "records": records, "comparisons": comparisons(records),
+                        "stopped_on_error": True}
+        return {"skip_reading_prefix_cache": getattr(args, "skip_prefix_cache", False),
+                "records": records, "comparisons": comparisons(records), "stopped_on_error": False}
     finally:
         await engine.close()
 
@@ -117,6 +123,9 @@ def main():
     parser.add_argument("--parallel", type=int, default=2, choices=range(2, 9))
     parser.add_argument("--repeats", type=int, default=2, choices=range(1, 4))
     parser.add_argument("--timeout", type=float, default=30)
+    parser.add_argument("--providers", choices=("both", "engine", "native"), default="both")
+    parser.add_argument("--skip-prefix-cache", action="store_true",
+                        help="Recompute prompts without reading existing prefix cache (writes remain enabled)")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     if args.timeout <= 0:

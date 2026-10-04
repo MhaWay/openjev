@@ -139,9 +139,10 @@ def score_batch(runner, batch, hidden_states, finished_req_ids,
 
     if not boundary_logits_only:
         runner.postprocess_num_computed_tokens(batch)
-        # Existing PP path uses zero accepted outputs for non-final prefill chunks.
-        # This advances recurrent state without adding any sampled output token.
-        runner.model_state.postprocess_state(batch.idx_mapping, 0)
+        # Zero sampled outputs retains Mamba's neutral acceptance count (one).
+        # Align mode needs the advanced GPU counts for recurrent-cache postprocess.
+        runner.model_state.postprocess_state(
+            batch.idx_mapping, 0, runner.req_states.num_computed_tokens.gpu)
     if runner.num_speculative_steps > 0:
         # Clear the transport's previous draft result; no drafter is invoked.
         runner.draft_tokens_handler.set_draft_tokens(
@@ -196,7 +197,8 @@ async def _final_output(generator, disconnected):
         await asyncio.gather(reader, watcher, return_exceptions=True)
 
 
-async def prefill_scores(chat, prompt, token_ids, *, request_id, disconnected):
+async def prefill_scores(chat, prompt, token_ids, *, request_id, disconnected,
+                         skip_reading_prefix_cache=False):
     """Consume the patched engine's numeric output, requiring zero output tokens."""
     engine = chat.engine_client
     try:
@@ -207,6 +209,7 @@ async def prefill_scores(chat, prompt, token_ids, *, request_id, disconnected):
     params = SamplingParams(max_tokens=1, n=1, temperature=0,
                             detokenize=False, ignore_eos=True,
                             output_kind=RequestOutputKind.FINAL_ONLY,
+                            skip_reading_prefix_cache=skip_reading_prefix_cache,
                             extra_args={MARKER: list(token_ids)})
     generator = engine.generate(prompt, params, request_id)
     completed = False

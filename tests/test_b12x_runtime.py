@@ -93,6 +93,35 @@ def torch_outputs(monkeypatch):
     return torch
 
 
+def test_native_chunk_advances_counts_before_recurrent_cache_postprocess(monkeypatch):
+    # No lm_head work is needed for an incomplete chunk; test the lifecycle
+    # without CUDA/torch and require the count buffer needed by Mamba align.
+    monkeypatch.setitem(sys.modules, "torch", ModuleType("torch"))
+    outputs = ModuleType("vllm.v1.outputs")
+    outputs.ModelRunnerOutput = NS
+    monkeypatch.setitem(sys.modules, "vllm", ModuleType("vllm"))
+    monkeypatch.setitem(sys.modules, "vllm.v1", ModuleType("vllm.v1"))
+    monkeypatch.setitem(sys.modules, "vllm.v1.outputs", outputs)
+    counts = [0]
+    checkpoints = []
+    def advance(batch):
+        counts[0] += batch.num_scheduled_tokens[0]
+    def postprocess(idx, sampled, computed):
+        assert computed is counts and sampled == 0
+        checkpoints.append(computed[0])
+    runner = NS(_forjev_requests={"q": [1, 2]},
+                req_states=NS(num_computed_tokens=NS(gpu=counts)),
+                postprocess_num_computed_tokens=advance,
+                model_state=NS(postprocess_state=postprocess),
+                num_speculative_steps=0, kv_connector=NS(post_forward=lambda _: None))
+    batch = NS(req_ids=["q"], num_reqs=1, num_draft_tokens=0,
+               num_computed_prefill_tokens_np=[0], num_scheduled_tokens=[2],
+               prefill_len_np=[6], idx_mapping=[0])
+    output = runtime.score_batch(runner, batch, None, set(), None, False)
+    assert output.pooler_output == [None] and output.sampled_token_ids == [[]]
+    assert checkpoints == [2]
+
+
 def runner_and_batch(torch, *, spec=True):
     events = []
     # The target's actual lm_head matrix is used by compute_logits. Each hidden
@@ -101,11 +130,12 @@ def runner_and_batch(torch, *, spec=True):
     runner = NS(
         model=NS(compute_logits=lambda hidden: hidden @ head),
         postprocess_num_computed_tokens=lambda b: events.append("computed"),
-        model_state=NS(postprocess_state=lambda idx, count: events.append(("state", count))),
+        model_state=NS(postprocess_state=lambda idx, count, computed: events.append(("state", count))),
         kv_connector=NS(post_forward=lambda ids: ("kv", ids)),
         num_speculative_steps=3 if spec else 0,
         draft_tokens_handler=NS(set_draft_tokens=lambda b, d: events.append(("draft", d.shape[1]))),
-        req_states=NS(draft_tokens=torch.ones((9, 3), dtype=torch.long)),
+        req_states=NS(draft_tokens=torch.ones((9, 3), dtype=torch.long),
+                      num_computed_tokens=NS(gpu=torch.zeros(9, dtype=torch.int32))),
     )
     runtime.remember_request(runner, "second", params([20, 10]))
     runtime.remember_request(runner, "first", params([10, 30]))

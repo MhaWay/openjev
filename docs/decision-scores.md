@@ -217,8 +217,8 @@ container and reload the resident model; neither downloads another checkpoint.
 `python -m openjev.forjev_parity` replays selected questions from a saved
 WorkflowEvals `results.json` using the same prompt builder as ForJev. It sends
 the same messages, template options and candidates directly to the numeric
-route, comparing serial and concurrent native requests, then serial and
-concurrent engine-logprob requests. It bypasses the adapter's inflight limit
+route, comparing serial and concurrent engine-logprob requests, then serial
+and concurrent native requests. It bypasses the adapter's inflight limit
 and SDK retries; no serving changes or restart are required. Run without other
 model traffic. The default is two repeats, concurrency two and a 30-second
 per-request timeout. A failed phase stops the diagnostic and saves its errors.
@@ -229,6 +229,21 @@ matching prompts/candidates before comparing distributions. This does not reset
 the prefix cache, establish a cold-cache baseline or guarantee identical GPU
 arithmetic across batch shapes. The engine bridge is a comparison path, not an
 independent correctness oracle; failures from its logprob collector are recorded.
+
+Use `--skip-prefix-cache` to set `SamplingParams.skip_reading_prefix_cache=true`
+on both providers. This recomputes prompts without reading cached prefixes;
+cache writes remain enabled and the existing cache is not cleared. The numeric
+HTTP route accepts the same strict boolean `skip_reading_prefix_cache`, default
+false. `--providers engine` or `--providers native` selects just one provider.
+Updated serving code must be installed and vLLM relaunched before these options
+can be used; updating the host-side diagnostic alone is insufficient.
+
+The native recurrent-state postprocess now receives the updated GPU computed
+token buffer, matching the ordinary runner's model-state interface. Previously
+the missing argument skipped Mamba align postprocessing. This is a lifecycle
+correction, not evidence that observed probability differences are resolved.
+The uploaded live diagnostic also showed serial-repeat drift in both providers;
+prefix-cache bypass and live GPU checks remain required.
 
 Example (replace the result path with your saved run):
 

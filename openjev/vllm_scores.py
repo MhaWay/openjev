@@ -10,7 +10,7 @@ from typing import Annotated
 
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 
 from .decision_scores import parse_response, score_response
 
@@ -25,6 +25,7 @@ class DecisionScoreRequest(BaseModel):
     candidate_token_ids: list[TokenID] = Field(min_length=2, max_length=255)
     chat_template_kwargs: dict = Field(default_factory=lambda: {"enable_thinking": False})
     require_prefill: bool = False
+    skip_reading_prefix_cache: StrictBool = False
 
 
 async def render_prompt(chat, request):
@@ -70,7 +71,8 @@ async def render_prompt(chat, request):
     return prompts[0]
 
 
-async def engine_scores(chat, prompt, token_ids, *, request_id, disconnected):
+async def engine_scores(chat, prompt, token_ids, *, request_id, disconnected,
+                        skip_reading_prefix_cache=False):
     """Read raw candidate logprobs directly from AsyncLLM, never chat formatting.
 
 One internal generation token is still scheduled. Missing rows remain errors;
@@ -84,7 +86,8 @@ this route cannot repair an upstream sampler/transport defect.
         raise HTTPException(400, "Candidate count exceeds vLLM max_logprobs")
     params = SamplingParams(max_tokens=1, temperature=0, n=1,
                             logprobs=len(token_ids), logprob_token_ids=token_ids,
-                            detokenize=False, ignore_eos=True)
+                            detokenize=False, ignore_eos=True,
+                            skip_reading_prefix_cache=skip_reading_prefix_cache)
     engine = chat.engine_client
     generator = engine.generate(prompt, params, request_id)
     result = None
@@ -138,9 +141,11 @@ provider makes require_prefill fail before rendering or inference.
             raise HTTPException(400, "Candidate token ID is outside the model vocabulary")
         prompt = await render(chat, body)
         provider = prefill_score if body.require_prefill else score
+        cache_options = ({"skip_reading_prefix_cache": True}
+                         if body.skip_reading_prefix_cache else {})
         data = await provider(chat, prompt, body.candidate_token_ids,
                               request_id="forjev-score-" + uuid.uuid4().hex,
-                              disconnected=request.is_disconnected)
+                              disconnected=request.is_disconnected, **cache_options)
         try:
             parse_response(data, body.candidate_token_ids, require_prefill=body.require_prefill)
         except (KeyError, TypeError, ValueError, OverflowError) as exc:
