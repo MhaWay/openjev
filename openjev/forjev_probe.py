@@ -33,6 +33,7 @@ async def probe(count, image=None):
             "criteria": {f"option_{i}": "target" if i == 0 else "alternative" for i in range(count)}
         }}, "ForJev capability probe", 0, images)
         return {"status": "ok", "model": engine.s.upstream_model,
+                "scoring": engine.s.forjev_scoring,
                 "candidate_count": count, "labels": dict(pairs), "input_tokens": tokens,
                 "answer": answers["probe"], "image_included": bool(image)}
     finally:

@@ -9,6 +9,7 @@ import httpx
 
 from .encoders import EncoderEngine
 from .engine import Overloaded, SchemaError, Upstream, model_ns, to_answer
+from .decision_scores import normalize, parse_response
 
 VERSION = "0.1.0"
 MODEL_NAME = "forjev-qwen-next"
@@ -95,14 +96,27 @@ class ForJevEngine(EncoderEngine):
         prompt = (f"Current state: {state_text}\nQuestion: {q['instructions']}\n"
                   f"Options:\n{options}\nAnswer with one label only:")
         content = list(images or []) + [{"type": "text", "text": prompt}]
+        request = {
+            "model": self.s.upstream_model,
+            "messages": [
+                {"role": "system", "content": "Select exactly one listed answer from the current state and image, if present."},
+                {"role": "user", "content": content},
+            ],
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        if self.s.forjev_scoring != "chat_logprobs":
+            async with self.slots:
+                d = await self._post("/v1/decision_scores", {
+                    **request, "candidate_token_ids": ids,
+                    "require_prefill": self.s.forjev_scoring == "prefill_scores",
+                })
+            try:
+                return parse_response(d, ids, require_prefill=self.s.forjev_scoring == "prefill_scores")
+            except (KeyError, IndexError, TypeError, ValueError, OverflowError) as exc:
+                raise Upstream(f"Qwen returned invalid decision scores: {exc}") from exc
         async with self.slots:
             d = await self._post("/v1/chat/completions", {
-                "model": self.s.upstream_model,
-                "messages": [
-                    {"role": "system", "content": "Select exactly one listed answer from the current state and image, if present."},
-                    {"role": "user", "content": content},
-                ],
-                "chat_template_kwargs": {"enable_thinking": False},
+                **request,
                 "max_tokens": 1,
                 "temperature": 0,
                 "logprobs": True,
@@ -117,10 +131,7 @@ class ForJevEngine(EncoderEngine):
             values = [got[i] for i in ids]
             if not all(math.isfinite(v) for v in values):
                 raise ValueError("non-finite logprob")
-            peak = max(values)
-            weights = [math.exp(v - peak) for v in values]
-            normalizer = sum(weights)
-            return [w / normalizer for w in weights], d["usage"]["prompt_tokens"]
+            return normalize(values), d["usage"]["prompt_tokens"]
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise Upstream("Qwen returned incomplete candidate logprobs") from exc
 
@@ -156,4 +167,3 @@ class ForJevEngine(EncoderEngine):
         for q, (probabilities, _) in zip(qs, results):
             answers[q["key"]] = to_answer(q, probabilities)
         return {key: answers[key] for key in questions}, sum(tokens for _, tokens in results), 0
-

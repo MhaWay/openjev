@@ -1,5 +1,9 @@
 # ForJev 0.1.0 — Qwen backend for OpenJEV
 
+An opt-in numeric scoring route is under development: see
+[decision-scores.md](docs/decision-scores.md) for the implemented engine bridge,
+the strict prefill-only contract, and the remaining B12X runner integration.
+
 ForJev turns an **already running Qwen/vLLM HTTP endpoint** into OpenJEV's
 typed decision API. It runs a CPU HTTP adapter and loads no LLM, tokenizer
 weights, vision tower or learned classification head. The same Qwen instance

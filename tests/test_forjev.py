@@ -9,6 +9,7 @@ from openjev.api import create_app
 from openjev.config import Settings
 from openjev.forjev import ForJevEngine, LABELS
 from openjev.engine import Upstream
+from openjev.decision_scores import score_response
 
 
 @pytest.fixture
@@ -183,3 +184,40 @@ def test_choice_cap_and_forced_answer(upstream):
         data["questions"]["one"]["criteria"] = {str(i): str(i) for i in range(21)}
         assert client.post("/v1/systemone", json=data).status_code == 400
         assert not upstream
+
+
+@pytest.mark.parametrize("mode,execution", [("engine_scores", "engine_logprobs"),
+                                           ("prefill_scores", "prefill_logits")])
+def test_numeric_scoring_preserves_typed_answers_and_images(monkeypatch, mode, execution):
+    calls = []
+    original = httpx.AsyncClient
+    def respond(request):
+        payload = json.loads(request.content)
+        calls.append((request.url.path, payload))
+        if request.url.path == "/tokenize":
+            return httpx.Response(200, json={"tokens": [ord(payload["prompt"])]})
+        assert request.url.path == "/v1/decision_scores"
+        ids = payload["candidate_token_ids"]
+        assert payload["require_prefill"] == (mode == "prefill_scores")
+        assert not any(k in payload for k in ("logprobs", "max_tokens", "top_logprobs"))
+        return httpx.Response(200, json=score_response(
+            ids[::-1], [-0.1] + [-3.0] * (len(ids) - 1), 42,
+            score_type="raw_logprobs", execution=execution))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original(
+        **{**kw, "transport": httpx.MockTransport(respond)}))
+    with TestClient(create_app(settings(forjev_scoring=mode))) as client:
+        response = client.post("/v1/systemone", json={**body(),
+            "images": ["data:image/jpeg;base64,/9j/2Q=="]})
+        assert response.status_code == 200, response.text
+        answers = response.json()["answers"]
+        assert answers["move"]["choice"] == "flee"
+        assert answers["move"]["probabilities"]["flee"] > 0.9
+        assert response.json()["usage"]["input_tokens"] == 126
+    scores = [b for path, b in calls if path == "/v1/decision_scores"]
+    assert len(scores) == 3
+    assert all(b["messages"][1]["content"][0]["type"] == "image_url" for b in scores)
+
+
+def test_scoring_setting_rejects_typos():
+    with pytest.raises(ValueError, match="FORJEV_SCORING"):
+        settings(forjev_scoring="direct")

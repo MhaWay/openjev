@@ -55,6 +55,7 @@ class Settings:
     jevk5_workers: int = field(default_factory=lambda: int(_env("OPENJEV_JEVK5_WORKERS", "32")))
     forjev_max_choices: int = field(default_factory=lambda: int(_env("FORJEV_MAX_CHOICES", "20")))
     forjev_upstream_api_key: str = field(default_factory=lambda: _env("FORJEV_UPSTREAM_API_KEY", ""))
+    forjev_scoring: str = field(default_factory=lambda: _env("FORJEV_SCORING", "chat_logprobs"))
     warmup: bool = field(default_factory=lambda: _env("OPENJEV_WARMUP", "1") != "0")
     # Other System One models served by other OpenJev containers: "name=url,name=url".
     # A request for one of them is passed through unchanged, so one origin serves all.
@@ -66,6 +67,8 @@ class Settings:
         0 never opens, so every request would wait out its timeout instead of a 529."""
         if not 2 <= self.forjev_max_choices <= 255:
             raise ValueError("FORJEV_MAX_CHOICES must be between 2 and 255")
+        if self.forjev_scoring not in {"chat_logprobs", "engine_scores", "prefill_scores"}:
+            raise ValueError("FORJEV_SCORING must be chat_logprobs, engine_scores or prefill_scores")
         positive = ("canvas", "canvas_step", "max_inflight", "max_questions", "max_body_bytes",
                     "max_image_bytes", "gen_max_inflight", "gen_max_tokens", "mlx_max_prompt",
                     "encoder_batch", "clm_workers", "jevk5_workers", "forward_timeout")
