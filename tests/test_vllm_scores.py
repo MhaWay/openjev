@@ -117,11 +117,12 @@ def sampling_params(monkeypatch):
     monkeypatch.setitem(sys.modules, "vllm.sampling_params", module)
 
 
-@pytest.mark.parametrize("bad", [None, "missing", "misaligned", "nonfinite"])
+@pytest.mark.parametrize("bad", [None, "missing", "misaligned", "nonfinite", "empty_row"])
 def test_internal_engine_readout_bypasses_formatter_and_rejects_missing_scores(sampling_params, bad):
     class Engine:
         def generate(self, prompt, params, request_id):
             assert params.detokenize is False
+            assert params.seed == 0
             assert params.logprob_token_ids == [10, 20]
             async def results():
                 row = {10: SimpleNamespace(logprob=-2.0), 20: SimpleNamespace(logprob=-0.2)}
@@ -129,6 +130,8 @@ def test_internal_engine_readout_bypasses_formatter_and_rejects_missing_scores(s
                     row.pop(20)
                 if bad == "nonfinite":
                     row[20].logprob = float("nan")
+                if bad == "empty_row":
+                    row = None
                 yield SimpleNamespace(prompt_token_ids=[1, 2], outputs=[SimpleNamespace(
                     token_ids=[5, 6] if bad == "misaligned" else [5],
                     logprobs=[row], finish_reason="length")])
@@ -146,6 +149,8 @@ def test_internal_engine_readout_bypasses_formatter_and_rejects_missing_scores(s
         with pytest.raises(HTTPException) as exc:
             asyncio.run(run())
         assert exc.value.status_code == 502
+        if bad == "missing":
+            assert exc.value.detail["missing_token_ids"] == [20]
     else:
         response = asyncio.run(run())
         assert response["execution"] == "engine_logprobs"

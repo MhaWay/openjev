@@ -66,6 +66,60 @@ versions are outside this first integration. A generic port must satisfy the
 [native provider requirements](#native-provider-requirements), add runtime
 compatibility checks and pass live acceptance on its own model/build.
 
+## B12X bridge with candidate logprobs
+
+The preferred next live profile is `deploy/B12X-bridge.Dockerfile` with
+`FORJEV_SCORING=engine_scores`. It uses the resident engine's ordinary batching,
+sampler/MTP verification and asynchronous output transport. It does not install
+native scheduler, output-processor, pooling or prefill-only hooks. Native requests
+return 501 in this profile. One internal output token is still generated.
+
+The supplied V2 rejection sampler omitted the ordinary sampler's per-request
+`logprob_token_ids` arguments. If another request contributes draft tokens, the
+whole batch enters rejection sampling, so a one-token decision can lose requested
+candidate columns even though it has no drafts. The checked correction forwards
+the candidate state, expanded request-slot mapping and maximum candidate width
+through every verification chunk to the existing `compute_topk_scores`. Accepted
+sampled tokens, rejection decisions and row offsets retain their existing code.
+Custom-only logprob requests also produce readouts when top-k is disabled.
+
+`openjev.b12x_logprobs_patch` verifies original/patched hashes, compiles all changes,
+keeps separate backups and defaults to dry run. It changes three files:
+
+| File | Bridge correction |
+| --- | --- |
+| `v1/worker/gpu/spec_decode/rejection_sampler.py` | Preserve custom candidate columns across expanded request rows and verification chunks |
+| `v1/worker/gpu/model_runner.py` | Include custom candidate width when gathering sharded sampler results |
+| `entrypoints/launchers/app.py` | Register the numeric bridge without a native provider |
+
+Build from the **original** pinned serving image, never from the experimental
+native image. The fingerprints reject the latter; native scheduler hooks must not
+remain in a bridge deployment. `FORJEV_B12X_PROFILE=bridge` is stored in the derived
+image so the existing launcher's `python -m openjev.b12x_patch` preflight delegates
+to the bridge verifier. Use the same `serve.sh` and its existing model/cache/KV
+settings. No weight files are copied or downloaded.
+
+```bash
+cd ~/openjev-forjev && git fetch origin feature/forjev-direct-scores && FORJEV_BUILD_DIR=$(mktemp -d /tmp/forjev-bridge.XXXXXX) && git archive origin/feature/forjev-direct-scores | tar -x -C "$FORJEV_BUILD_DIR" && docker build --network=none --build-arg B12X_BASE_IMAGE=vllm-node-b12x -f "$FORJEV_BUILD_DIR/deploy/B12X-bridge.Dockerfile" -t vllm-node-b12x-forjev "$FORJEV_BUILD_DIR"
+```
+
+Launch the derived image using the existing ForJev-enabled `serve.sh`, then update
+the host adapter and select `FORJEV_SCORING=engine_scores`. Both the correction and
+route registration need a full serving relaunch/model reload. `docker restart`
+alone does not rerun the reference launcher's `docker exec` startup sequence.
+
+The bridge requests `seed=0` and `temperature=0`. This controls token sampling;
+it does not guarantee deterministic raw model logits or calibrated probabilities.
+Missing candidate IDs now appear explicitly in a 502 response; no truncation,
+padding of missing probabilities, retries or argmax substitute repairs them.
+
+CPU tests run the actual patched rejection methods on mixed planner/decision
+batches, candidates outside top-k, sparse request slots, verification chunks,
+custom-only readouts and device-style adaptive offsets. GPU kernels are stubbed
+for these tests. Live candidate completeness and mixed-load decode performance
+still require validation. This addresses a confirmed candidate omission in the
+source; elimination of the earlier token/logprob-length 500 is not yet proven.
+
 ## Native B12X implementation
 
 The supplied runtime is `0.1.dev20759+gb40673cd0.d20260913`. Its files have been

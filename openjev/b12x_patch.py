@@ -104,13 +104,15 @@ def atomic_write(path, data):
         temp_path.unlink(missing_ok=True)
 
 
-def prepare(root, *, revert=False):
-    manifest = json.loads(Path(__file__).with_name("b12x_manifest.json").read_text())
+def prepare(root, *, revert=False, manifest_name="b12x_manifest.json",
+            rules=RULES, transform_source=transform,
+            backup_suffix=".forjev-original"):
+    manifest = json.loads(Path(__file__).with_name(manifest_name).read_text())
     prepared = []
-    for name in RULES:
+    for name in rules:
         path = root / name
         data = path.read_bytes()
-        backup = path.with_name(path.name + ".forjev-original")
+        backup = path.with_name(path.name + backup_suffix)
         expected = manifest["files"][name]
         digest = sha(data)
         if digest not in (expected["original"], expected["patched"]):
@@ -125,7 +127,7 @@ def prepare(root, *, revert=False):
         elif digest == expected["original"]:
             if backup.exists() and sha(backup.read_bytes()) != digest:
                 raise ValueError(f"{name}: existing backup does not match source")
-            patched = transform(name, data.decode()).encode()
+            patched = transform_source(name, data.decode()).encode()
             if sha(patched) != expected["patched"]:
                 raise ValueError(f"{name}: patch fingerprint mismatch")
             prepared.append((path, data, patched, backup))
@@ -149,6 +151,11 @@ def apply(prepared, *, revert=False):
 
 
 def main():
+    # The bridge image uses the same launcher preflight command, while retaining
+    # a separate manifest/installer and no native scheduler hooks.
+    if os.environ.get("FORJEV_B12X_PROFILE") == "bridge":
+        from .b12x_logprobs_patch import main as bridge_main
+        return bridge_main()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, help="Installed vllm package directory")
     flags = parser.add_mutually_exclusive_group()

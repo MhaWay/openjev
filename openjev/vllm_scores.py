@@ -5,6 +5,7 @@ does not claim to bypass the sampler: that needs a runner-specific provider.
 vLLM imports are lazy so CPU tests and the ForJev adapter need no GPU packages.
 """
 import asyncio
+from collections.abc import Mapping
 import uuid
 from typing import Annotated
 
@@ -84,7 +85,7 @@ this route cannot repair an upstream sampler/transport defect.
     max_logprobs = getattr(chat.model_config, "max_logprobs", None)
     if max_logprobs is not None and len(token_ids) > max_logprobs:
         raise HTTPException(400, "Candidate count exceeds vLLM max_logprobs")
-    params = SamplingParams(max_tokens=1, temperature=0, n=1,
+    params = SamplingParams(max_tokens=1, temperature=0, seed=0, n=1,
                             logprobs=len(token_ids), logprob_token_ids=token_ids,
                             detokenize=False, ignore_eos=True,
                             skip_reading_prefix_cache=skip_reading_prefix_cache)
@@ -109,6 +110,12 @@ this route cannot repair an upstream sampler/transport defect.
             or output.logprobs is None or len(output.logprobs) != 1):
         raise HTTPException(502, "vLLM returned misaligned candidate logprobs")
     row = output.logprobs[0]
+    if not isinstance(row, Mapping):
+        raise HTTPException(502, "vLLM returned an empty candidate logprob row")
+    missing = [t for t in token_ids if t not in row]
+    if missing:
+        raise HTTPException(502, {"message": "vLLM omitted requested candidate logprobs",
+                                  "missing_token_ids": missing})
     try:
         values = [row[t].logprob for t in token_ids]
         return score_response(token_ids, values, len(result.prompt_token_ids),

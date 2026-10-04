@@ -7,6 +7,12 @@ See the deployment matrix below and
 rollback and live acceptance requirements. Native scoring is experimental;
 GPU probability parity and shared-engine performance have not been validated.
 
+For the checked B12X V2 build, the preferred next live test is now the
+[bridge image with the MTP candidate-logprob correction](docs/decision-scores.md#b12x-bridge-with-candidate-logprobs).
+It preserves ordinary scheduling, mixed batches and speculative execution.
+The earlier native image isolates scoring steps and showed substantial decode
+slowdown during the user's mixed workload; it remains experimental.
+
 ForJev turns an **already running Qwen/vLLM HTTP endpoint** into OpenJEV's
 typed decision API. It runs a CPU HTTP adapter and loads no LLM, tokenizer
 weights, vision tower or learned classification head. The same Qwen instance

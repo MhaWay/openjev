@@ -27,7 +27,7 @@ build-backend = "setuptools.build_meta"
 packages = ["openjev"]
 
 [tool.setuptools.package-data]
-openjev = ["b12x_manifest.json"]
+openjev = ["b12x_manifest.json", "b12x_logprobs_manifest.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
