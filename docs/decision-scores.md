@@ -10,7 +10,7 @@ remain unchanged. No learned head or second model is required.
 | --- | --- | --- |
 | `chat_logprobs` | `/v1/chat/completions` | Existing default, backwards compatible |
 | `engine_scores` | `/v1/decision_scores` | Numeric bridge implemented; live runtime integration required |
-| `prefill_scores` | `/v1/decision_scores` | Contract implemented; native runner provider still required |
+| `prefill_scores` | `/v1/decision_scores` | Native B12X V2 integration implemented; Spark acceptance pending |
 
 The engine bridge reads AsyncLLM results without `_create_chat_logprobs`.
 It still schedules one generated token and uses the internal logprob collector,
@@ -20,7 +20,86 @@ not promise MTP bypass or latency savings. Missing/misaligned data fails closed.
 `prefill_scores` requires genuine prefill-only execution and never downgrades
 to generation, argmax or fabricated confidence. Without a native provider the
 route returns HTTP 501 before rendering/inference. An environment setting alone
-does not implement that provider.
+does not implement that provider. The native implementation and checked installer
+are described below.
+
+## Native B12X implementation
+
+The supplied runtime is `0.1.dev20759+gb40673cd0.d20260913`. Its files have been
+fingerprinted in `openjev/b12x_manifest.json`. `python -m openjev.b12x_patch`
+verifies those fingerprints and compiles all modified sources before writing.
+It defaults to dry run; `--apply` writes five files and retains original copies;
+`--revert` verifies those copies and restores them. A write failure rolls back
+the files already written. Stop installation if the source fingerprints differ.
+
+This first native provider requires **V2**, TP/PP/DP/CP=1, a decoder generation
+runner, and no remote KV transfer. It supports the resident model without LoRA
+or streaming input. V1 and parallel configurations return 501 before submission;
+do not change runner configuration solely to bypass that check.
+
+The scheduler alternates scoring and generation steps when both classes have
+pending work. Scoring batches contain only scoring requests, with zero scheduled
+speculative tokens. Async scheduling reserves one lifecycle placeholder to keep
+the final prefill from being scheduled again; no output token is created. The
+worker projects the actual target lm_head only for completed prompt rows,
+gathers requested columns and returns CPU tensors through the existing pooling
+transport. Intermediate chunks emit no scores. Full recurrent-cache boundary
+hits reuse the saved target hidden state and skip MTP replay. Numeric outputs
+finish the request and reach AsyncLLM as zero-token generation results.
+
+No sampler, temperature/penalty processing, MTP proposal or speculative
+verification runs on these scoring batches. The planner continues to use its
+existing sampler and MTP paths on generation batches. Batch isolation and its
+effect on planner throughput still need live measurement. Full vocabulary
+logits are projected for completed rows; this is not a selected-row lm_head
+implementation. `candidate_mass` is null because no full-vocabulary normalizer
+is calculated. Conditional action probabilities remain available.
+
+Applying the patch installs the route on the next normal vLLM startup. The
+route retains `/v1` authentication; `FORJEV_NATIVE_SCORES=0` disables route
+registration. Installation does not create an engine or load any weights.
+Pending scoring is aborted on client disconnection, including during prefill.
+
+### Install in the existing container
+
+Use the reviewed branch `feature/forjev-direct-scores` in `~/openjev-forjev`.
+Check out the published commit you intend to test, then update the adapter and
+copy the same source to the vLLM container. The following is a single line:
+
+```bash
+cd ~/openjev-forjev && bash setup-forjev.sh && docker cp . qwen38-flash:/tmp/forjev-native && docker exec qwen38-flash python3 -m pip install --no-deps --no-build-isolation /tmp/forjev-native && docker exec qwen38-flash python3 -m openjev.b12x_patch
+```
+
+The last command is dry run. Successful verification prints five files. Applying
+and restarting Qwen interrupts current inference, so do it between agent runs:
+
+```bash
+docker exec qwen38-flash python3 -m openjev.b12x_patch --apply && docker restart qwen38-flash
+```
+
+After Qwen is healthy, run the existing read-only capability probe in native
+mode, including an image if required:
+
+```bash
+cd ~/openjev-forjev && set -a && source .forjev.env && set +a && FORJEV_SCORING=prefill_scores .venv-forjev/bin/python -m openjev.forjev_probe --choices 20
+```
+
+The shell override applies only to the probe. After live acceptance, set
+`FORJEV_SCORING=prefill_scores` in `.forjev.env` and restart ForJev. Keep the
+default legacy mode until then. Native mode fails rather than silently reverting
+to generation if its provider is unsupported or malformed.
+
+Rollback is also a single line (it interrupts Qwen):
+
+```bash
+docker exec qwen38-flash python3 -m openjev.b12x_patch --revert && docker restart qwen38-flash
+```
+
+Container recreation loses these installed changes. For a durable deployment,
+build a derivative of the exact pinned B12X image, copy this package into it,
+install with `--no-deps`, and run `python -m openjev.b12x_patch --apply` during
+the image build. Preserve the original entrypoint and serving configuration.
+The source fingerprint check also applies to that build.
 
 ## Runtime integration
 
@@ -28,7 +107,8 @@ Install this package inside the existing vLLM runtime and call
 `openjev.vllm_scores.install_routes(app)` on its existing FastAPI app before
 serving. Do not construct another engine or load another model. The exact
 insertion point must be checked against the installed runtime sources; this
-branch does not automatically deploy, patch or restart any running container.
+generic route installer does not deploy or restart a running container. The
+explicit B12X source installer above registers the native provider.
 
 The `/v1` route inherits the app's authentication middleware. It validates the
 model and uses vLLM's existing multimodal chat renderer. The initial renderer
@@ -90,8 +170,15 @@ a substitute for its actual input.
 CPU tests cover logit/logprob normalization equivalence, full vocabulary mass,
 reordered/missing candidates, execution metadata, typed answers, image forwarding,
 route validation, request identity, cancellation and backwards compatibility.
+Native tests use real PyTorch CPU projections for row/column identity, completed
+versus intermediate chunks, saved boundaries and nonfinite outputs. With
+`B12X_SOURCE_DIR` pointing to the supplied `vllm` source directory, they also
+execute the actual patched async-scheduler/output-processor methods and verify
+apply, idempotence, fingerprint rejection and rollback. PyTorch is required for
+the native numeric tests; without it those cases skip.
 
 Run `python -m pytest tests/test_decision_scores.py tests/test_vllm_scores.py tests/test_forjev.py tests/test_forjev_service.py -q`.
+Add `tests/test_b12x_runtime.py` for native tests.
 
 Live acceptance requires the actual B12X build: compare distributions with
 successful legacy calls and exercise concurrent planner traffic, batch sizes,
