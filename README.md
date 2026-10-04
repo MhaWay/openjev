@@ -2,6 +2,9 @@
 > See [ForJev setup, API requirements and examples](README-ForJev.md).
 > Default deployment: OpenJEV/ForJev on `:8001`, existing Qwen on `:8000`.
 > Run `bash setup-forjev.sh` then `bash restart-forjev.sh start`.
+> The default uses candidate chat logprobs. Experimental prefill-only scoring
+> requires a compatible vLLM serving patch and restart; see
+> [scoring modes and serving requirements](docs/decision-scores.md).
 > The Docker instructions below describe upstream DiffusionGemma, not the ForJev setup.
 
 # OpenJev

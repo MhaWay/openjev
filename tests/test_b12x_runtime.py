@@ -49,7 +49,7 @@ def test_batch_selection_fairness_and_final_prefill_fence():
     assert runtime.choose_step(sched) is True
 
 
-@pytest.mark.parametrize("change", ["v1", "tp", "kv", "encoder", "pooling"])
+@pytest.mark.parametrize("change", ["v1", "tp", "kv", "encoder", "pooling", "diffusion", "encoder_only"])
 def test_unsupported_runtime_is_rejected(change):
     cfg = config()
     if change == "v1":
@@ -60,6 +60,10 @@ def test_unsupported_runtime_is_rejected(change):
         cfg.kv_transfer_config = object()
     elif change == "encoder":
         cfg.model_config.is_encoder_decoder = True
+    elif change == "diffusion":
+        cfg.model_config.is_diffusion = True
+    elif change == "encoder_only":
+        cfg.is_mm_encoder_only = True
     else:
         cfg.model_config.runner_type = "pooling"
     with pytest.raises(ValueError):

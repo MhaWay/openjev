@@ -41,9 +41,11 @@ def check_config(config):
             raise ValueError("Native decision scoring currently requires TP/PP/DP/CP=1")
     model = config.model_config
     if (getattr(model, "is_encoder_decoder", False)
+            or getattr(model, "is_diffusion", False)
+            or getattr(config, "is_mm_encoder_only", False)
             or getattr(model, "is_mm_encoder_only", False)
             or getattr(model, "runner_type", "generate") != "generate"):
-        raise ValueError("Native decision scoring requires a decoder generation runner")
+        raise ValueError("Native decision scoring requires an autoregressive decoder generation runner")
     if getattr(config, "kv_transfer_config", None) is not None:
         raise ValueError("Native decision scoring does not support remote KV transfer")
 

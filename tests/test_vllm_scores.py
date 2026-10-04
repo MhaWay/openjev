@@ -77,6 +77,21 @@ def test_duplicate_route_installation_is_rejected():
         install_routes(make_app())
 
 
+def test_bridge_requests_remain_bridge_when_native_provider_is_installed():
+    async def render(*args):
+        return {"prompt_token_ids": [1]}
+    async def bridge(chat, prompt, ids, **kwargs):
+        return score_response(ids, [-2.0, -0.2], 1,
+                              score_type="raw_logprobs", execution="engine_logprobs")
+    async def native(*args, **kwargs):
+        pytest.fail("require_prefill=false selects the bridge explicitly")
+    with TestClient(make_app(render=render, score=bridge, prefill_score=native)) as client:
+        response = client.post("/v1/decision_scores", json=body())
+        assert response.status_code == 200
+        assert response.json()["execution"] == "engine_logprobs"
+        assert response.json()["generated_tokens"] == 1
+
+
 @pytest.fixture
 def sampling_params(monkeypatch):
     module = ModuleType("vllm.sampling_params")

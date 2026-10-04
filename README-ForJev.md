@@ -1,8 +1,11 @@
 # ForJev 0.1.0 — Qwen backend for OpenJEV
 
-An opt-in numeric scoring route is under development: see
-[decision-scores.md](docs/decision-scores.md) for the implemented engine bridge,
-the strict prefill-only contract, and the remaining B12X runner integration.
+ForJev has a standard HTTP mode and two opt-in numeric scoring modes.
+**The native mode requires changes to the vLLM serving process and a restart.**
+See the deployment matrix below and
+[decision-scores.md](docs/decision-scores.md) for serving changes, installation,
+rollback and live acceptance requirements. Native scoring is experimental;
+GPU probability parity and shared-engine performance have not been validated.
 
 ForJev turns an **already running Qwen/vLLM HTTP endpoint** into OpenJEV's
 typed decision API. It runs a CPU HTTP adapter and loads no LLM, tokenizer
@@ -19,9 +22,28 @@ schema validation, authentication, errors and answer formatting.
 | `http://<spark>:8001/health` | Adapter liveness |
 | `http://<spark>:8001/ready` | Adapter plus upstream health |
 
-No Qwen restart, image update, port move or second model download is part of
-this installation. Existing hidden-state capture and the older gateway on
-8088 are independent and are not used by ForJev.
+The default `chat_logprobs` installation uses the existing serving API and
+requires no Qwen restart or second model download when that API is compatible.
+`engine_scores` requires registering a route inside the serving API process.
+`prefill_scores` additionally requires the checked scheduler/worker integration;
+applying it requires restarting vLLM and reloading its resident model. Neither
+numeric mode is enabled merely by installing the HTTP adapter. Existing
+hidden-state capture and the older gateway on 8088 are independent.
+
+## Scoring modes and serving responsibilities
+
+| `FORJEV_SCORING` | Required serving behavior | Serving changes / restart | Upstream execution |
+| --- | --- | --- | --- |
+| `chat_logprobs` (default) | `/v1/chat/completions` returns every requested candidate's token ID and logprob | None if the existing API implements the required fields; otherwise serving support is needed | One internal generated token; sampler and configured speculative path remain available |
+| `engine_scores` | `/v1/decision_scores` reads raw logprobs from the existing AsyncLLM | Register the numeric route in the API process; restart/redeploy that process | One internal generated token; avoids chat formatting but retains sampler and logprob transport |
+| `prefill_scores` (experimental) | `/v1/decision_scores` returns final-prompt raw logits with `generated_tokens: 0` | Checked B12X V2 scheduler, worker, output processor and API integration; restart vLLM | Target prefill and lm_head; no score-request sampling, MTP drafting or speculative verification |
+
+The standard mode retains the observed vLLM chat-logprob 500 failure. The
+engine bridge does not repair missing upstream logprobs. Native scoring avoids
+those sampling/logprob-formatting paths by design, but has not yet been proven
+to resolve the observed failure under live shared-engine load. Defaults remain
+standard mode until live acceptance. No mode invents missing probabilities or
+silently substitutes an argmax-only result.
 
 
 ## Supported models and deployment profiles
@@ -49,6 +71,32 @@ Reference deployment details:
   after testing its tokenizer, non-thinking template, candidate logprobs,
   optional vision, and representative decision quality.
 
+### Model portability versus serving portability
+
+The scoring principle applies to autoregressive language models exposing raw
+next-token logits: choose single-token labels in the model's own tokenizer and
+normalize their scores over the supplied options. No CLM head or model-specific
+trained weights are transplanted. The adapter does not hardcode Qwen token IDs
+or a vocabulary size; `forjev-qwen-next` remains the existing wire alias.
+
+This does **not** certify every checkpoint or serving stack. Each model needs
+enough distinct single-token labels, a compatible chat template that predicts
+the answer label without a preceding reasoning segment, and representative
+decision-quality tests. The current template request uses
+`enable_thinking=false`; another family's template may need a different
+implementation. Images additionally require actual vision support. Passing
+the small capability probe establishes API functionality, not decision quality
+or calibration across tasks.
+
+The native installer is restricted to fingerprinted sources from
+`0.1.dev20759+gb40673cd0.d20260913`, V2, TP/PP/DP/CP=1, decoder generation,
+and no remote KV transfer. LoRA, streaming input, encoder-decoder and diffusion
+models are outside its supported request/configuration scope. Other
+autoregressive checkpoints on that runtime are candidates for testing, not
+validated profiles. A different vLLM build needs a reviewed provider port and
+new source fingerprints; changing only the model name or enabling an environment
+variable does not make the patch compatible.
+
 ## Suitable providers and endpoint exposure
 
 Compatibility depends on the exposed API and the served model/build, not on
@@ -63,6 +111,11 @@ passes the ForJev probe.
 | **RunPod Serverless Load Balancer with a compatible vLLM image** | Conditional candidate; its documented direct-route mode can expose vLLM routes | Use the direct server root; pass the probe. Queue-style `/run` or `/runsync` APIs need a separate adapter and are not accepted by ForJev |
 | Your own remote GPU VM/container | Suitable if you control the model server and routing | Same routes and request fields as local vLLM; supply `FORJEV_UPSTREAM_API_KEY` if required |
 | Generic managed “OpenAI-compatible” model API | Not certified merely by that label | Must expose tokenizer access and exact candidate logprobs; plain chat, JSON output or top-k-only probabilities are insufficient |
+
+The provider table describes **standard mode**. Numeric modes additionally
+require `/v1/decision_scores` and control of the serving API; native mode also
+requires the compatible worker integration and a scheduled restart. A managed
+API cannot gain native scoring through a ForJev-only configuration change.
 
 The existing Spark image may be hardware/architecture-specific. A provider
 must have enough resources for the model and a compatible serving build;
@@ -145,7 +198,9 @@ roll back source changes. Fix the reported error and run start again.
 
 The detached adapter survives terminal/harness disconnection. It does not
 automatically start after a machine reboot. The harness stays on Qwen :8000,
-so no reconnect listener or model restart is necessary.
+so adapter lifecycle/port changes require no reconnect listener or model
+restart. This does not remove the separate vLLM restart required when installing
+the native serving patch.
 
 Manual foreground launch, after exporting the settings above:
 
@@ -193,16 +248,20 @@ port; direct Qwen clients remain unchanged.
 
 For each nontrivial question, ForJev formats state, question and options into
 a prompt, assigns each option a distinct single-token label, and optionally
-includes the supplied image parts. It requests one output token with thinking
-disabled and reads the **next-token logprobs of every candidate label**.
-It normalizes these with `exp(logprob - max) / sum(exp(...))` and delegates
+includes the supplied image parts. In standard and engine-bridge modes it
+requests one output token with thinking disabled and reads the **next-token
+logprobs of every candidate label**. Native mode reads the raw logits at the
+final prompt position without generating a token. It normalizes the selected
+scores with `exp(score - max) / sum(exp(...))` and delegates
 choice/score/noul formatting to OpenJEV.
 
-The full prompt prefill still runs. There is one upstream chat request per
-question and `max_tokens=1`, not a full generated explanation. A one-option
-choice can be returned without inference. OpenJEV's `output_tokens: 0`
-denotes the decision-only wire contract, not zero upstream compute or zero
-provider-billed output tokens. Input usage sums actual upstream prompt tokens.
+The target prompt computation still runs, subject to valid prefix-cache reuse.
+There is one upstream scoring request per nontrivial question, not a generated
+explanation. Standard/bridge requests use `max_tokens=1`; native requests reserve
+the same lifecycle limit but finish with no output token. A one-option choice
+can be returned without inference. OpenJEV's `output_tokens: 0` denotes the
+decision-only wire contract: only verified native execution also means zero
+upstream generated tokens. Input usage sums actual upstream prompt tokens.
 
 Probabilities are relative to the provided options, not calibrated real-world
 certainty. OpenJEV's entropy-based confidence is preserved. Label order,
@@ -211,7 +270,8 @@ trained JevK5 checkpoint or diffusion inference implementation.
 
 ## API and token IDs required from Qwen/vLLM
 
-The adapter currently requires:
+All modes require `/health`, `/v1/models` and the served `/tokenize` API.
+**Standard mode** additionally requires the following chat behavior:
 
 1. `GET /health` and `GET /v1/models` for its launcher preflight.
 2. `POST /tokenize` accepting `model`, `prompt`, `add_special_tokens:false`,
@@ -223,13 +283,21 @@ The adapter currently requires:
 4. For vision, OpenAI-style `image_url` content and a multimodal model/template.
    The Qwen template must honor `chat_template_kwargs:{"enable_thinking":false}`.
 
-These are per-request options. No ForJev worker extension, pooling runner,
+In standard mode these are per-request options. No ForJev worker extension, pooling runner,
 dev RPC or hidden-state patch is required. The previously tested pinned b12x
 build supports this route for small candidate sets; verify this new integration
 live before treating it as production-ready. Do not upgrade a working image
 merely to install this adapter.
 
-The pinned vLLM build has occasionally returned an HTTP 500 while assembling
+For numeric modes, replace requirement 3 with the versioned
+[`/v1/decision_scores` contract](docs/decision-scores.md#numeric-contract).
+The endpoint must use the same served model, tokenizer, chat template and image
+preprocessing. Native mode requires `execution: prefill_logits` and
+`generated_tokens: 0`; the adapter rejects a generated-token substitute.
+The [serving integration guide](docs/decision-scores.md#native-b12x-implementation)
+lists the exact five patched vLLM files, restart, dry run, rollback and tests.
+
+In standard mode, the pinned vLLM build has occasionally returned an HTTP 500 while assembling
 one-token chat logprobs (`_create_chat_logprobs`: `list index out of range`).
 ForJev retries that specific response at most twice, with short delays. Other
 errors still propagate. This mitigates an intermittent serving failure; it
@@ -321,6 +389,10 @@ or compatibility with a real future model.
 ```
 
 ### Public JevBench run
+
+These are historical **standard `chat_logprobs`** results. They do not establish
+native-scoring probability parity, latency, calibration or immunity to the
+observed serving failure; native GPU acceptance is still pending.
 
 On 2026-09-29, one DGX Spark running the pinned Eugr b12x Qwen3.8-Flash-Next
 INT4 setup answered all **231 public JevBench tasks** through ForJev's

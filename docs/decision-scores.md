@@ -4,6 +4,15 @@ ForJev can request a numeric next-token readout from the resident vLLM model.
 Prompt construction, images, tokenizer discovery, labels and typed answers
 remain unchanged. No learned head or second model is required.
 
+**Deployment responsibility:** the HTTP adapter alone cannot expose resident
+model logits or change inference execution. Standard mode can use an existing
+compatible API without changing serving. Both numeric modes require code inside
+the serving API process; native mode also requires scheduler/worker changes and
+a full vLLM restart/model reload. Installing the package or running the dry run
+does not apply those serving changes. Native scoring is experimental until GPU
+probability parity, cancellation/cache behavior and concurrent planner traffic
+have passed live acceptance. The earlier public benchmark used standard mode.
+
 ## Implementation status
 
 | `FORJEV_SCORING` | Upstream path | Status |
@@ -23,6 +32,40 @@ route returns HTTP 501 before rendering/inference. An environment setting alone
 does not implement that provider. The native implementation and checked installer
 are described below.
 
+## Model and serving compatibility are separate
+
+The numerical method uses each autoregressive model's own tokenizer and actual
+lm_head. For selected logits `z_i`, the conditional action distribution is
+`exp(z_i - max(z)) / sum_j exp(z_j - max(z))`; applying that same normalization
+to raw vocabulary logprobs yields the same result because their shared
+normalizer cancels. Neither requires a new head trained on Qwen or hardcoded
+Qwen token IDs. Next-token probabilities still do not measure calibrated action
+success.
+
+That mathematical portability is not implementation certification. A new
+checkpoint needs label-token discovery, its chat template/answer position,
+thinking suppression, optional vision and representative quality checks.
+The renderer currently supports only `enable_thinking=false`; templates needing
+different controls need a reviewed renderer change. Context limits and
+quantization remain the serving model's constraints. The maintained tested
+profile is Qwen3.8-Flash-Next on the reference stack; other families and
+quantizations are unvalidated candidates.
+
+The native provider calls the loaded model's `compute_logits`, so it uses the
+actual resident quantization instead of loading a floating-point copy. A
+different quantization still needs quality/probability validation; it is not
+assumed equivalent to the original checkpoint. This differs from CLM's learned
+projection heads, which require their matching encoder embeddings.
+
+The supplied native integration is source-specific to one B12X build and its
+V2 runner. Decoder autoregressive models compatible with that runtime may be
+testable through the same hooks, but are not automatically supported by their
+architecture name. Diffusion, encoder-decoder, pooling/encoder-only runners,
+LoRA, streaming input, parallel/disaggregated execution and arbitrary vLLM
+versions are outside this first integration. A generic port must satisfy the
+[native provider requirements](#native-provider-requirements), add runtime
+compatibility checks and pass live acceptance on its own model/build.
+
 ## Native B12X implementation
 
 The supplied runtime is `0.1.dev20759+gb40673cd0.d20260913`. Its files have been
@@ -32,10 +75,29 @@ It defaults to dry run; `--apply` writes five files and retains original copies;
 `--revert` verifies those copies and restores them. A write failure rolls back
 the files already written. Stop installation if the source fingerprints differ.
 
-This first native provider requires **V2**, TP/PP/DP/CP=1, a decoder generation
+This first native provider requires **V2**, TP/PP/DP/CP=1, an autoregressive decoder generation
 runner, and no remote KV transfer. It supports the resident model without LoRA
 or streaming input. V1 and parallel configurations return 501 before submission;
 do not change runner configuration solely to bypass that check.
+
+### Changes required inside the serving process
+
+The installer changes exactly these files under the installed `vllm` package:
+
+| File | Serving change |
+| --- | --- |
+| `v1/core/sched/scheduler.py` | Validate score requests; isolate scoring batches; reserve zero draft slots; finish on numeric output; exclude scoring from speculative-depth observations |
+| `v1/core/sched/async_scheduler.py` | Fence final prefills with one lifecycle placeholder while scheduling no speculative IDs |
+| `v1/worker/gpu/model_runner.py` | Keep candidates by request identity; project completed target prompt rows; bypass sampler and MTP including cached-boundary draft replay; clean up request metadata |
+| `v1/engine/output_processor.py` | Convert the transported numeric tensor to an empty-token generation result accepted by AsyncLLM |
+| `entrypoints/launchers/app.py` | Register `/v1/decision_scores` with the resident engine's renderer and the native provider |
+
+Hook implementations live in `openjev.b12x_runtime`; `openjev.vllm_scores`
+provides HTTP validation and rendering. Existing pooling transport carries the
+numeric rows, but the model remains a generation runner: enabling a separate
+pooling model or exposing embeddings is not sufficient. Source fingerprints
+prevent the installer from applying these changes to another build merely
+because filenames happen to match.
 
 The scheduler alternates scoring and generation steps when both classes have
 pending work. Scoring batches contain only scoring requests, with zero scheduled
@@ -62,23 +124,32 @@ Pending scoring is aborted on client disconnection, including during prefill.
 
 ### Install in the existing container
 
-Use the reviewed branch `feature/forjev-direct-scores` in `~/openjev-forjev`.
-Check out the published commit you intend to test, then update the adapter and
-copy the same source to the vLLM container. The following is a single line:
+The following example is for the reference `qwen38-flash` container and a fork
+checkout at `~/openjev-forjev`. Other deployments must replace those names and
+retain their original image, entrypoint and configuration. It copies only the
+committed source from the scoring branch, not the checkout's credentials or
+virtual environment, installs without resolving model/CUDA dependencies, and
+runs a read-only source verification. It does not change the host checkout:
 
 ```bash
-cd ~/openjev-forjev && bash setup-forjev.sh && docker cp . qwen38-flash:/tmp/forjev-native && docker exec qwen38-flash python3 -m pip install --no-deps --no-build-isolation /tmp/forjev-native && docker exec qwen38-flash python3 -m openjev.b12x_patch
+cd ~/openjev-forjev && git fetch origin feature/forjev-direct-scores && git archive --format=tar origin/feature/forjev-direct-scores --output=/tmp/forjev-native.tar && docker cp /tmp/forjev-native.tar qwen38-flash:/tmp/forjev-native.tar && docker exec qwen38-flash sh -c 'mkdir -p /tmp/forjev-native && tar -xf /tmp/forjev-native.tar -C /tmp/forjev-native' && docker exec qwen38-flash python3 -m pip install --no-deps --no-build-isolation /tmp/forjev-native && docker exec qwen38-flash python3 -m openjev.b12x_patch
 ```
 
-The last command is dry run. Successful verification prints five files. Applying
-and restarting Qwen interrupts current inference, so do it between agent runs:
+Review and pin the selected commit when building a repeatable deployment.
+The last command is dry run. Successful verification prints five files. Ensure
+the running configuration uses V2 and the supported parallelism before applying.
+Applying alone changes files on disk, not the code already loaded in Python.
+Restarting vLLM activates them and reloads the same model weights, interrupting
+current inference. Schedule that interruption between agent runs:
 
 ```bash
 docker exec qwen38-flash python3 -m openjev.b12x_patch --apply && docker restart qwen38-flash
 ```
 
-After Qwen is healthy, run the existing read-only capability probe in native
-mode, including an image if required:
+After vLLM is healthy, install the matching ForJev source revision in the host
+adapter environment with `bash setup-forjev.sh`. This is a separate adapter
+update and does not manage vLLM. Run the existing read-only capability probe in
+native mode, including an image if required:
 
 ```bash
 cd ~/openjev-forjev && set -a && source .forjev.env && set +a && FORJEV_SCORING=prefill_scores .venv-forjev/bin/python -m openjev.forjev_probe --choices 20
@@ -110,6 +181,15 @@ insertion point must be checked against the installed runtime sources; this
 generic route installer does not deploy or restart a running container. The
 explicit B12X source installer above registers the native provider.
 
+For a bridge-only integration, call `install_routes(app)` during the serving
+API's app construction, before it starts accepting requests. Restart/redeploy
+the API process using that app; do not create an additional engine. Worker
+changes are unnecessary for the bridge, but its internal generation/logprob
+path remains. This is a serving integration step, not a ForJev-only feature
+toggle. For native integration call
+`install_routes(app, prefill_score=provider)` only when the checked worker and
+scheduler changes are also installed.
+
 The `/v1` route inherits the app's authentication middleware. It validates the
 model and uses vLLM's existing multimodal chat renderer. The initial renderer
 supports only the resident base model, no LoRA, tools or arbitrary template
@@ -126,6 +206,8 @@ SystemOne clients and TypeSafe answer shapes need no changes.
 The request contains `model`, `messages`,
 `chat_template_kwargs: {"enable_thinking": false}`, `candidate_token_ids`
 (unique IDs discovered through the served tokenizer), and `require_prefill`.
+`require_prefill=false` selects the engine bridge, even if a native provider is
+installed; `true` selects the native provider or returns 501 when it is absent.
 
 | Response field | Meaning |
 | --- | --- |

@@ -137,7 +137,7 @@ provider makes require_prefill fail before rendering or inference.
         if any(t >= vocab_size for t in body.candidate_token_ids):
             raise HTTPException(400, "Candidate token ID is outside the model vocabulary")
         prompt = await render(chat, body)
-        provider = prefill_score or score
+        provider = prefill_score if body.require_prefill else score
         data = await provider(chat, prompt, body.candidate_token_ids,
                               request_id="forjev-score-" + uuid.uuid4().hex,
                               disconnected=request.is_disconnected)
